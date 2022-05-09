@@ -2,19 +2,18 @@
 // This library implements rrt star referenced in https://arxiv.org/pdf/1105.1186.pdf
 // Author : Yash Trikannad
 
-#include <ros/ros.h>
-#include <ros/package.h>
-#include <sensor_msgs/LaserScan.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/PointStamped.h>
-#include <geometry_msgs/Pose.h>
-#include <geometry_msgs/Point.h>
-#include <ackermann_msgs/AckermannDriveStamped.h>
-#include <nav_msgs/OccupancyGrid.h>
-#include <tf/transform_listener.h>
-#include <tf2_ros/transform_listener.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#include <visualization_msgs/Marker.h>
+#include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/laser_scan.hpp"
+#include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/pose.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "tf2_ros/transform_listener.h"
+#include "tf2_ros/buffer.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.h"
+#include "visualization_msgs/msg/marker.hpp"
 
 #include <cmath>
 #include <vector>
@@ -24,18 +23,18 @@
 #include <iterator>
 #include <string>
 #include <algorithm>
-#include <boost/algorithm/string.hpp>
+// #include <boost/algorithm/string.hpp>
 #include <random>
 
 /// Struct defining the Node object in the RRT tree.
-struct Node
+struct TrackNode
 {
-    Node() = default;
-    Node(const double x, const double y, const int parent_index) :
+    TrackNode() = default;
+    TrackNode(const double x, const double y, const int parent_index) :
         x(x), y(y), cost(0.0), parent_index(parent_index)
     {}
 
-    Node(const double x, const double y, double cost, const int parent_index) :
+    TrackNode(const double x, const double y, double cost, const int parent_index) :
             x(x), y(y), cost(0.0), parent_index(parent_index)
     {}
 
@@ -47,39 +46,38 @@ struct Node
 
 
 /// RRT Class used for searching across the graph
-class RRT {
+class RRT : public rclcpp::Node {
 public:
-    RRT(ros::NodeHandle &nh);
+    explicit RRT(const rclcpp::NodeOptions & options);
 
 private:
-    ros::NodeHandle nh_;
-
     /// Publisher and Subscribers
-    ros::Subscriber pose_sub_;
-    ros::Subscriber scan_sub_;
-    ros::Publisher drive_pub_;
-    ros::Publisher dynamic_map_pub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr dynamic_map_pub_;
+    rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
 
     /// Visualization
-    ros::Publisher tree_viz_pub_;
-    ros::Publisher waypoint_viz_pub_;
-    visualization_msgs::Marker points_;
-    visualization_msgs::Marker line_strip_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr tree_viz_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr waypoint_viz_pub_;
+    visualization_msgs::msg::Marker::SharedPtr points_;
+    visualization_msgs::msg::Marker::SharedPtr line_strip_;
     int unique_id_;
 
     /// Transformations
-    tf2_ros::TransformListener tf2_listener_;
-    tf2_ros::Buffer tf_buffer_;
-    tf::TransformListener listener_;
-    geometry_msgs::TransformStamped tf_laser_to_map_;
-    geometry_msgs::TransformStamped tf_map_to_laser_;
+    std::shared_ptr<tf2_ros::TransformListener> tf2_listener_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    geometry_msgs::msg::TransformStamped tf_laser_to_output_;
+    geometry_msgs::msg::TransformStamped tf_output_to_laser_;
 
     std::mt19937 gen;
     std::uniform_real_distribution<> x_dist;
     std::uniform_real_distribution<> y_dist;
 
     /// Map
-    nav_msgs::OccupancyGrid input_map_;
+    nav_msgs::msg::OccupancyGrid input_map_;
     int map_cols_;
     std::vector<size_t > new_obstacles_;
     int clear_obstacles_count_;
@@ -110,16 +108,22 @@ private:
     std::vector<std::array<double, 2>> global_path_;
     std::vector<std::array<double, 2>> local_path_;
 
+    // Node parameters
+    std::string output_frame_id_;
+    std::string input_frame_id_;
+    bool received_global_map_;
+    bool publish_drive_;
+
     /// Near search radius for a node in the RRT* tree
     double search_radius_;
 
     /// The pose callback when subscribed to particle filter's inferred pose (RRT Main Loop)
     /// @param pose_msg - pointer to the incoming pose message
-    void pose_callback(const geometry_msgs::PoseStamped::ConstPtr& pose_msg);
+    void pose_callback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr pose_msg);
 
     /// The scan callback, update your occupancy grid here
     /// @param scan_msg - pointer to the incoming scan message
-    void scan_callback(const sensor_msgs::LaserScan::ConstPtr& scan_msg);
+    void scan_callback(const sensor_msgs::msg::LaserScan::ConstSharedPtr scan_msg);
 
     /// RRT methods
 
@@ -132,7 +136,7 @@ private:
     /// @param tree - the current RRT tree
     /// @param sampled_point - the sampled point in free space
     /// @return - index of nearest node on the tree
-    static int nearest(const std::vector<Node> &tree, const std::array<double, 2> &sampled_point);
+    static int nearest(const std::vector<TrackNode> &tree, const std::array<double, 2> &sampled_point);
 
     /// The function steer:(x,y)->z returns a point such that z is “closer”
     /// to y than x is. The point z returned by the function steer will be
@@ -142,14 +146,14 @@ private:
     /// @param nearest_node - nearest node on the tree to the sampled point
     /// @param sampled_point - the sampled point in free space
     /// @return - new node created from steering
-    Node steer(const Node &nearest_node, int nearest_node_index, const std::array<double, 2> &sampled_point);
+    TrackNode steer(const TrackNode &nearest_node, int nearest_node_index, const std::array<double, 2> &sampled_point);
 
     /// This method returns a boolean indicating if the path between the
     /// nearest node and the new node created from steering is collision free
     /// @param nearest_node - nearest node on the tree to the sampled point
     /// @param new_node - new node created from steering
     /// @return - true if in collision, false otherwise
-    bool is_collided(const Node &nearest_node, const Node &new_node);
+    bool is_collided(const TrackNode &nearest_node, const TrackNode &new_node);
 
     /// This method checks if the latest node added to the tree is close
     /// enough (defined by goal_threshold) to the goal so we can terminate
@@ -158,7 +162,7 @@ private:
     /// @param goal_x - x coordinate of the current goal
     /// @param goal_y - y coordinate of the current goal
     /// @return - true if node close enough to the goal
-    bool is_goal(const Node &latest_added_node, double goal_x, double goal_y);
+    bool is_goal(const TrackNode &latest_added_node, double goal_x, double goal_y);
 
     /// This method traverses the tree from the node that has been determined
     /// as goal
@@ -166,7 +170,7 @@ private:
     /// @param latest_added_node - latest addition to the tree that has been
     /// determined to be close enough to the goal
     /// @return - the vector that represents the order of the nodes traversed as the found path
-    static std::vector<std::array<double, 2>> find_path(const std::vector<Node> &tree, const Node &latest_added_node);
+    static std::vector<std::array<double, 2>> find_path(const std::vector<TrackNode> &tree, const TrackNode &latest_added_node);
 
     /// RRT* methods
 
@@ -174,13 +178,13 @@ private:
     /// @param tree - the current tree
     /// @param node - the node the cost is calculated for
     /// @return - the cost value associated with the node
-    double cost(const std::vector<Node> &tree, const Node &node);
+    double cost(const std::vector<TrackNode> &tree, const TrackNode &node);
 
     /// This method returns the cost of the straight line path between two nodes (Not Implemented)
     /// @param n1 - the Node at one end of the path
     /// @param n2 - the Node at the other end of the path
     /// @return - the cost value associated with the path
-    double line_cost(const Node &n1, const Node &n2);
+    double line_cost(const TrackNode &n1, const TrackNode &n2);
 
     /// (Not Implemented)
     /// This method returns the set of Nodes in the neighborhood of a node. (Not Implemented)
@@ -189,7 +193,7 @@ private:
     /// @return - the index of the nodes in the neighborhood
     /// Can use this to increase the speed of search to log(n)
     /// (S. Arya and D. M. Mount. Approximate range searching. Computational Geometry: Theory and Applications)
-    std::vector<int> near(const std::vector<Node> &tree, const Node &node);
+    std::vector<int> near(const std::vector<TrackNode> &tree, const TrackNode &node);
 
     /// Checks if a sample in the workspace is colliding with an obstacle
     /// @param x_map - x coordinates in map frame
